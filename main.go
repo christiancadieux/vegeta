@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -11,6 +12,8 @@ import (
 	"strings"
 )
 
+var Context context.Context
+
 func main() {
 	commands := map[string]command{
 		"attack": attackCmd(),
@@ -19,6 +22,10 @@ func main() {
 		"encode": encodeCmd(),
 		"dump":   dumpCmd(),
 	}
+
+	ctx, cxl := context.WithCancel(context.Background())
+	Context = ctx
+	defer cxl()
 
 	fs := flag.NewFlagSet("vegeta", flag.ExitOnError)
 	cpus := fs.Int("cpus", runtime.NumCPU(), "Number of CPUs to use")

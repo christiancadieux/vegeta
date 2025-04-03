@@ -46,6 +46,7 @@ func attackCmd() command {
 	fs.BoolVar(&opts.insecure, "insecure", false, "Ignore invalid server TLS certificates")
 	fs.BoolVar(&opts.lazy, "lazy", false, "Read targets lazily")
 	fs.DurationVar(&opts.duration, "duration", 0, "Duration of the test [0 = forever]")
+	fs.DurationVar(&opts.loopWait, "loopwait", 0, "wait seconds and test again")
 	fs.DurationVar(&opts.timeout, "timeout", vegeta.DefaultTimeout, "Requests timeout")
 	fs.Uint64Var(&opts.workers, "workers", vegeta.DefaultWorkers, "Initial number of workers")
 	fs.Uint64Var(&opts.maxWorkers, "max-workers", vegeta.DefaultMaxWorkers, "Maximum number of workers")
@@ -93,6 +94,7 @@ type attackOpts struct {
 	chunked        bool
 	duration       time.Duration
 	timeout        time.Duration
+	loopWait       time.Duration
 	rate           vegeta.Rate
 	workers        uint64
 	maxWorkers     uint64
@@ -203,7 +205,41 @@ func attack(opts *attackOpts) (err error) {
 		go srv.ListenAndServe()
 	}
 
-	atk := vegeta.NewAttacker(
+	if opts.loopWait != 0 {
+		cnt := 0
+		sig := make(chan os.Signal, 1)
+
+		signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+		for {
+			cnt++
+			fmt.Fprintln(os.Stderr, "Running attack", cnt)
+			atk := newAttack(opts, tlsc, proxyHdr)
+			atk.Attack(tr, opts.rate, opts.duration, opts.name)
+			res := atk.Attack(tr, opts.rate, opts.duration, opts.name)
+			enc := vegeta.NewEncoder(out)
+			processAttack(atk, res, enc, sig, pm)
+
+			select {
+			case <-sig:
+				fmt.Fprintln(os.Stderr, "Received SIGTERM")
+				return
+			case <-time.After(opts.loopWait):
+
+			}
+		}
+	}
+
+	atk := newAttack(opts, tlsc, proxyHdr)
+	res := atk.Attack(tr, opts.rate, opts.duration, opts.name)
+	enc := vegeta.NewEncoder(out)
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+
+	return processAttack(atk, res, enc, sig, pm)
+}
+
+func newAttack(opts *attackOpts, tlsc *tls.Config, proxyHdr http.Header) *vegeta.Attacker {
+	return vegeta.NewAttacker(
 		vegeta.Redirects(opts.redirects),
 		vegeta.Timeout(opts.timeout),
 		vegeta.LocalAddr(*opts.laddr.IPAddr),
@@ -223,13 +259,6 @@ func attack(opts *attackOpts) (err error) {
 		vegeta.ConnectTo(opts.connectTo),
 		vegeta.SessionTickets(opts.sessionTickets),
 	)
-
-	res := atk.Attack(tr, opts.rate, opts.duration, opts.name)
-	enc := vegeta.NewEncoder(out)
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
-
-	return processAttack(atk, res, enc, sig, pm)
 }
 
 func processAttack(
@@ -243,6 +272,7 @@ func processAttack(
 		select {
 		case <-sig:
 			if stopSent := atk.Stop(); !stopSent {
+				fmt.Fprintln(os.Stderr, "STOP")
 				// Exit immediately on second signal.
 				return nil
 			}
